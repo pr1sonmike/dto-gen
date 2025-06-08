@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"log"
 	"os"
 	"strings"
 	"text/template"
@@ -49,28 +50,58 @@ func main() {
 	flag.Parse()
 
 	if *input == "" || *output == "" || *structName == "" {
-		fmt.Println("Usage: dto-gen --input file.go --output file_dto.go --type StructName")
-		os.Exit(1)
+		log.Fatal("Usage: dto-gen --input file.go --output file_dto.go --type StructName")
 	}
 
 	fset := token.NewFileSet()
 	node, err := parser.ParseFile(fset, *input, nil, parser.AllErrors)
 	if err != nil {
-		panic(err)
+		log.Fatalf("Failed to parse file: %v", err)
 	}
 
-	var fields []Field
-	var packageName = node.Name.Name
+	fields, packageName := findStructFields(node, *structName)
+	if fields == nil {
+		log.Fatalf("Struct %s not found in file %s", *structName, *input)
+	}
 
-	// Find the struct
+	data := TemplateData{
+		PackageName:  packageName,
+		DTOName:      *structName + "DTO",
+		OriginalName: *structName,
+		MapperFunc:   "To" + *structName + "DTO",
+		Fields:       fields,
+	}
+
+	t, err := template.New("dto").Parse(tpl)
+	if err != nil {
+		log.Fatalf("Failed to parse template: %v", err)
+	}
+
+	out, err := os.Create(*output)
+	if err != nil {
+		log.Fatalf("Failed to create output file: %v", err)
+	}
+	defer out.Close()
+
+	if err := t.Execute(out, data); err != nil {
+		log.Fatalf("Failed to execute template: %v", err)
+	}
+
+	fmt.Println("DTO generated at", *output)
+}
+
+func findStructFields(node *ast.File, structName string) ([]Field, string) {
+	var fields []Field
+	packageName := node.Name.Name
+
 	for _, decl := range node.Decls {
 		genDecl, ok := decl.(*ast.GenDecl)
 		if !ok || genDecl.Tok != token.TYPE {
 			continue
 		}
 		for _, spec := range genDecl.Specs {
-			tspec := spec.(*ast.TypeSpec)
-			if tspec.Name.Name != *structName {
+			tspec, ok := spec.(*ast.TypeSpec)
+			if !ok || tspec.Name.Name != structName {
 				continue
 			}
 			stype, ok := tspec.Type.(*ast.StructType)
@@ -89,31 +120,9 @@ func main() {
 			}
 		}
 	}
-
-	data := TemplateData{
-		PackageName:  packageName,
-		DTOName:      *structName + "DTO",
-		OriginalName: *structName,
-		MapperFunc:   "To" + *structName + "DTO",
-		Fields:       fields,
-	}
-
-	t := template.Must(template.New("dto").Parse(tpl))
-	out, err := os.Create(*output)
-	if err != nil {
-		panic(err)
-	}
-	defer out.Close()
-
-	err = t.Execute(out, data)
-	if err != nil {
-		panic(err)
-	}
-
-	fmt.Println("DTO generated at", *output)
+	return fields, packageName
 }
 
-// Helper: convert type expression to string
 func exprToString(expr ast.Expr) string {
 	switch t := expr.(type) {
 	case *ast.Ident:
